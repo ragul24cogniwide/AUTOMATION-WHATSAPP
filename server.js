@@ -10,6 +10,7 @@ const qrcodeTerminal = require('qrcode-terminal');
 const {
   default: makeWASocket,
   useMultiFileAuthState,
+  makeCacheableSignalKeyStore,
   DisconnectReason,
   downloadMediaMessage,
   fetchLatestBaileysVersion,
@@ -33,6 +34,7 @@ let connectedUser = null;
 let pool = null;
 let lastUserChatJid = null;
 const sentMessageIds = new Set();
+const recentMessages = new Map();
 
 // Initialize PostgreSQL connection pool if DATABASE_URL is set
 if (DATABASE_URL) {
@@ -126,11 +128,21 @@ async function startWhatsApp() {
   const { version, isLatest } = await fetchLatestBaileysVersion();
   console.log(`[WhatsApp Bridge] Using Baileys v${version.join('.')}, isLatest: ${isLatest}`);
 
+  const pinoLogger = pino({ level: 'silent' });
   sock = makeWASocket({
     version,
-    auth: state,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, pinoLogger),
+    },
+    getMessage: async (key) => {
+      if (recentMessages.has(key.id)) {
+        return recentMessages.get(key.id);
+      }
+      return undefined;
+    },
     printQRInTerminal: false,
-    logger: pino({ level: 'silent' }),
+    logger: pinoLogger,
     browser: ['Sage Assistant', 'Chrome', '1.0.0'],
     syncFullHistory: false,
     connectTimeoutMs: 60000,
@@ -233,6 +245,15 @@ async function startWhatsApp() {
 
       // Ignore broadcast status updates
       if (msg.key.remoteJid === 'status@broadcast') return;
+
+      // Cache message in memory for retry requests
+      if (msg.key?.id && msg.message) {
+        recentMessages.set(msg.key.id, msg.message);
+        if (recentMessages.size > 500) {
+          const firstKey = recentMessages.keys().next().value;
+          recentMessages.delete(firstKey);
+        }
+      }
 
       // Ignore messages sent by Sage itself to prevent echo/feedback loops
       if (msg.key?.id && sentMessageIds.has(msg.key.id)) {
@@ -374,6 +395,17 @@ app.post('/send', async (req, res) => {
 
     const result = await sock.sendMessage(jid, { text: message });
 
+    if (result?.key?.id && result?.message) {
+      recentMessages.set(result.key.id, result.message);
+      if (recentMessages.size > 500) {
+        const firstKey = recentMessages.keys().next().value;
+        recentMessages.delete(firstKey);
+      }
+    }
+
+    // Immediately persist ratchets & session updates to Neon DB
+    saveAuthToPostgres().catch(() => {});
+
     // Track sent message ID so echo is not processed as a new incoming command
     if (result?.key?.id) {
       sentMessageIds.add(result.key.id);
@@ -387,6 +419,13 @@ app.post('/send', async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+
+// Periodic background sync of auth session to Neon DB (every 15 seconds)
+setInterval(async () => {
+  if (isConnected) {
+    await saveAuthToPostgres();
+  }
+}, 15000);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
