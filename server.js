@@ -31,6 +31,7 @@ let isConnected = false;
 let isConnecting = false;
 let connectedUser = null;
 let pool = null;
+let lastUserChatJid = null;
 const sentMessageIds = new Set();
 
 // Initialize PostgreSQL connection pool if DATABASE_URL is set
@@ -242,12 +243,25 @@ async function startWhatsApp() {
       const isFromMe = Boolean(msg.key.fromMe);
       const cleanPhone = remoteJid.split('@')[0].split(':')[0];
       const myPhone = sock.user?.id ? sock.user.id.split(':')[0].split('@')[0] : '';
+      const myLid = sock.user?.lid ? sock.user.lid.split(':')[0].split('@')[0] : '';
+      const allowedPhone = (process.env.USER_PHONE || '918946014462').replace(/\D/g, '');
 
-      // If sent by me, only process if sent in my OWN personal chat ("Message Yourself" / notes chat)
-      // Ignore messages sent to friends or other contacts
-      if (isFromMe && cleanPhone !== myPhone && !remoteJid.includes(myPhone)) {
+      // STRICT PRIVACY RULE: ONLY process messages from the user's self-chat!
+      // NEVER intercept or reply to friends, family, or other contacts!
+      const isSelfChat =
+        cleanPhone === myPhone ||
+        cleanPhone === myLid ||
+        cleanPhone === allowedPhone ||
+        remoteJid.includes(myPhone) ||
+        (myLid && remoteJid.includes(myLid));
+
+      if (!isSelfChat) {
+        // Someone else messaged the user -> DO NOT INTERCEPT!
         return;
       }
+
+      // Record the exact chat JID the user has open (whether it's @s.whatsapp.net or @lid)
+      lastUserChatJid = remoteJid;
 
       // Detect text content
       let textContent =
@@ -277,9 +291,9 @@ async function startWhatsApp() {
       // If there is no text and no audio, ignore
       if (!textContent && !audioBase64) return;
 
-      const effectivePhone = isFromMe ? myPhone : cleanPhone;
+      const effectivePhone = myPhone || allowedPhone;
       console.log(
-        `[WhatsApp Bridge] Incoming message from: ${effectivePhone} | isFromMe: ${isFromMe} | isVoice: ${isVoice} | text: "${textContent}"`
+        `[WhatsApp Bridge] User message in ${remoteJid} | isVoice: ${isVoice} | text: "${textContent}"`
       );
 
       // Forward to Sage FastAPI backend
@@ -323,7 +337,7 @@ app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 // Send Message Endpoint (called by Sage backend to dispatch reminders & daily briefings)
 app.post('/send', async (req, res) => {
   try {
-    const { to, message } = req.body;
+    const { to, message, remote_jid } = req.body;
     if (!to || !message) {
       return res.status(400).json({ error: 'Missing "to" or "message" in request body' });
     }
@@ -334,13 +348,28 @@ app.post('/send', async (req, res) => {
       });
     }
 
-    // Format phone to JID
     let cleanDigits = to.replace(/\D/g, '');
-    let jid = `${cleanDigits}@s.whatsapp.net`;
+    const myPhone = sock.user?.id ? sock.user.id.split(':')[0].split('@')[0] : '';
+    const myLid = sock.user?.lid ? sock.user.lid.split(':')[0].split('@')[0] : '';
+    const allowedPhone = (process.env.USER_PHONE || '918946014462').replace(/\D/g, '');
 
-    // Support messaging oneself
-    if (cleanDigits === '' || cleanDigits === 'self') {
-      jid = sock.user.id;
+    const isToUser =
+      cleanDigits === '' ||
+      cleanDigits === 'self' ||
+      cleanDigits === myPhone ||
+      cleanDigits === myLid ||
+      cleanDigits === allowedPhone;
+
+    // Send to the exact chat window (remote_jid or lastUserChatJid for self-chat)
+    let jid;
+    if (remote_jid) {
+      jid = remote_jid;
+    } else if (isToUser && lastUserChatJid) {
+      jid = lastUserChatJid;
+    } else if (isToUser) {
+      jid = `${myPhone || allowedPhone}@s.whatsapp.net`;
+    } else {
+      jid = `${cleanDigits}@s.whatsapp.net`;
     }
 
     const result = await sock.sendMessage(jid, { text: message });
