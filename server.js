@@ -111,6 +111,9 @@ async function startWhatsApp() {
   if (sock) {
     try {
       sock.ev.removeAllListeners();
+      if (sock.ws) {
+        try { sock.ws.close(); } catch (e) {}
+      }
       sock.end();
     } catch (e) {}
     sock = null;
@@ -127,7 +130,7 @@ async function startWhatsApp() {
     auth: state,
     printQRInTerminal: false,
     logger: pino({ level: 'silent' }),
-    browser: Browsers.macOS('Desktop'),
+    browser: ['Sage Assistant', 'Chrome', '1.0.0'],
     syncFullHistory: false,
     connectTimeoutMs: 60000,
     keepAliveIntervalMs: 25000,
@@ -175,11 +178,19 @@ async function startWhatsApp() {
         lastDisconnect?.error?.output?.statusCode ||
         lastDisconnect?.error?.statusCode;
       const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
+      const isConflict = statusCode === DisconnectReason.connectionReplaced || statusCode === 440;
+      const delayMs = isConflict ? 15000 : 3000;
       const reasonMsg = lastDisconnect?.error?.message || 'Unknown error';
 
       console.log(
-        `[WhatsApp Bridge] Connection closed (statusCode: ${statusCode}, reason: ${reasonMsg}). Reconnecting: ${!isLoggedOut}`
+        `[WhatsApp Bridge] Connection closed (statusCode: ${statusCode}, reason: ${reasonMsg}). Reconnecting: ${!isLoggedOut} in ${delayMs / 1000}s`
       );
+
+      if (isConflict) {
+        console.warn(
+          '[WhatsApp Bridge] Note: If the bridge is also running on Render/cloud, ensure only ONE instance is active to avoid conflict!'
+        );
+      }
 
       if (!isLoggedOut) {
         // Automatically reconnect without clearing database session
@@ -187,7 +198,7 @@ async function startWhatsApp() {
           startWhatsApp().catch((err) => {
             console.error('[WhatsApp Bridge] Reconnect error:', err.message);
           });
-        }, 3000);
+        }, delayMs);
       } else {
         console.log('[WhatsApp Bridge] Device logged out by user. Resetting session...');
         if (pool) {
