@@ -1,0 +1,22 @@
+services:
+  whatsapp-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sage-whatsapp-bridge
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - DATABASE_URL=postgresql://neondb_owner:npg_wE7nFSK6tlYs@ep-lingering-lab-b5ft0ytc-pooler.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require
+      # Forward incoming WhatsApp messages to your backend on Render:
+      - BACKEND_WEBHOOK_URL=https://agent-automation-e5dh.onrender.com/api/whatsapp/webhook
+    volumes:
+      - ./auth_info_baileys:/app/auth_info_baileys
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/health', (r) => { process.exit(r.statusCode === 200 ? 0 : 1); });"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s

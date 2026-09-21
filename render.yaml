@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: sage-whatsapp-bridge
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: PORT
+        value: 3001
+      - key: DATABASE_URL
+        sync: false
+      - key: BACKEND_WEBHOOK_URL
+        value: https://agent-automation-e5dh.onrender.com/api/whatsapp/webhook
